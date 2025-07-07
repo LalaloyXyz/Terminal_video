@@ -487,69 +487,67 @@ public:
     }
     
     bool playFromCamera(int camera_id = 0, int width = 80, int height = 24) {
-    //     cv::VideoCapture cap(camera_id);
-    //     if (!cap.isOpened()) {
-    //         std::cerr << "Error: Failed to open camera " << camera_id << std::endl;
-    //         return false;
-    //     }
-    //     std::cout << "Camera feed started. Controls: [Q]uit [C]olor [B]lock [F]ullscreen [S]tats [R]eset cache\n";
-    //     TerminalGuard guard(original_termios, terminal_modified);
-    //     cv::Mat frame;
-    //     bool block_mode = false, fullscreen_mode = false;
-    //     int original_width = width, original_height = height;
-    //     auto last_time = std::chrono::steady_clock::now();
+        cv::VideoCapture cap(camera_id);
+        if (!cap.isOpened()) {
+            std::cerr << "Error: Failed to open camera " << camera_id << std::endl;
+            return false;
+        }
+        std::cout << "Camera feed started. Controls: [Q]uit [C]olor [B]lock [F]ullscreen [S]tats [R]eset cache\n";
+        TerminalGuard guard(original_termios, terminal_modified);
+        cv::Mat frame;
+        bool block_mode = false, fullscreen_mode = false;
+        int original_width = width, original_height = height;
+        auto last_time = std::chrono::steady_clock::now();
         
-    //     while (true) {
-    //         if (kbhit()) {
-    //             char key;
-    //             while (read(STDIN_FILENO, &key, 1) > 0) {
-    //                 if (key == 'q' || key == 'Q') goto camera_cleanup;
-    //                 else if (key == 'c' || key == 'C') setColorMode(static_cast<ColorMode>((current_color_mode + 1) % 3));
-    //                 else if (key == 'b' || key == 'B') block_mode = !block_mode;
-    //                 else if (key == 's' || key == 'S') {
-    //                     std::cout << "\033[2J\033[H";
-    //                     displayCacheStats();
-    //                     std::cout << "Press any key to continue...";
-    //                     std::cin.get();
-    //                 }
-    //                 else if (key == 'r' || key == 'R') clearColorCaches();
-    //                 else if (key == 'f' || key == 'F') {
-    //                     fullscreen_mode = !fullscreen_mode;
-    //                     if (fullscreen_mode) {
-    //                         TerminalSize term = getTerminalSize();
-    //                         width = term.width - 2;
-    //                         height = term.height - 4;
-    //                     } else {
-    //                         width = original_width;
-    //                         height = original_height;
-    //                     }
-    //                 }
-    //             }
-    //         }
+        while (true) {
+            if (kbhit()) {
+                char key;
+                while (read(STDIN_FILENO, &key, 1) > 0) {
+                    if (key == 'q' || key == 'Q') goto camera_cleanup;
+                    else if (key == 'c' || key == 'C') setColorMode(static_cast<ColorMode>((current_color_mode + 1) % 3));
+                    else if (key == 'b' || key == 'B') block_mode = !block_mode;
+                    else if (key == 's' || key == 'S') {
+                        std::cout << "\033[2J\033[H";
+                        std::cout << "Press any key to continue...";
+                        std::cin.get();
+                    }
+                    else if (key == 'r' || key == 'R') clearColorCaches();
+                    else if (key == 'f' || key == 'F') {
+                        fullscreen_mode = !fullscreen_mode;
+                        if (fullscreen_mode) {
+                            TerminalSize term = getTerminalSize();
+                            width = term.width - 2;
+                            height = term.height - 4;
+                        } else {
+                            width = original_width;
+                            height = original_height;
+                        }
+                    }
+                }
+            }
             
-    //         if (!cap.read(frame) || frame.empty()) continue;
+            if (!cap.read(frame) || frame.empty()) continue;
             
-    //         std::cout << "\033[2J\033[H";
-    //         std::string ascii = (block_mode && current_color_mode != MONO) ? 
-    //                            frameToColorBlocks(frame, width, height) : frameToAscii(frame, width, height);
-    //         std::cout << ascii;
+            std::cout << "\033[2J\033[H";
+            std::string ascii = (block_mode && current_color_mode != MONO) ? 
+                               frameToColorBlocks(frame, width, height) : frameToAscii(frame, width, height);
+            std::cout << ascii;
             
-    //         std::string color_mode_str = (current_color_mode == MONO ? "MONO" : 
-    //                                     current_color_mode == COLOR_8BIT ? "8BIT" : "24BIT");
-    //         std::cout << resetColor() << "Mode: " << color_mode_str << (block_mode ? "-BLOCK" : "")
-    //                   << (fullscreen_mode ? " FULLSCREEN" : "")
-    //                   << " | Cache: " << std::fixed << std::setprecision(1) << cache_stats.hit_rate() << "%"
-    //                   << " | [Q]uit [C]olor [B]lock [F]ullscreen [S]tats [R]eset" << std::flush;
+            std::string color_mode_str = (current_color_mode == MONO ? "MONO" : 
+                                        current_color_mode == COLOR_8BIT ? "8BIT" : "24BIT");
+            std::cout << resetColor() << "Mode: " << color_mode_str << (block_mode ? "-BLOCK" : "")
+                      << (fullscreen_mode ? " FULLSCREEN" : "")
+                      << " | Cache: " << std::fixed << std::setprecision(1) << cache_stats.hit_rate() << "%"
+                      << " | [Q]uit [C]olor [B]lock [F]ullscreen [S]tats [R]eset" << std::flush;
             
-    //         auto now = std::chrono::steady_clock::now();
-    //         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_time).count();
-    //         if (elapsed < 33) std::this_thread::sleep_for(std::chrono::milliseconds(33 - elapsed));
-    //         last_time = std::chrono::steady_clock::now();
-    //     }
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_time).count();
+            if (elapsed < 33) std::this_thread::sleep_for(std::chrono::milliseconds(33 - elapsed));
+            last_time = std::chrono::steady_clock::now();
+        }
         
-    // camera_cleanup:
-    //     std::cout << resetColor();
-    //     displayCacheStats();
+    camera_cleanup:
+        std::cout << resetColor();
         return true;
     }
 };
