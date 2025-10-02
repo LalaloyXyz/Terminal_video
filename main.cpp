@@ -14,8 +14,33 @@
 #include <poll.h>
 #include <unordered_map>
 #include <sstream>
+#include <atomic>
+#include <condition_variable>
+#include "player_config.hpp"
 
 class ASCIIVideoPlayer {
+public:
+    // Add these member variables near the beginning of the class
+    bool block_mode = false;
+    int current_width = 0;
+    int current_height = 0;
+    int original_width = 0;
+    int original_height = 0;
+
+private:
+    // Move private members here
+    static const size_t FRAME_BUFFER_SIZE = 16;
+    struct BufferedFrame {
+        cv::Mat frame;
+        std::string ascii_output;
+    };
+    std::vector<BufferedFrame> frame_buffer;
+    std::thread buffer_thread;
+    std::atomic<bool> buffer_running{false};
+    std::mutex buffer_mutex;
+    std::condition_variable buffer_cv;
+    bool loop_video = false;
+
 public:
     // Enhanced ASCII character set for better detail
     const std::string ASCII_CHARS = " .'`^\",:;Il!i><~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$";
@@ -203,10 +228,14 @@ public:
         }
     }
 
-public:
     ASCIIVideoPlayer() {
         instance = this;
         initializeBrightnessLookup();
+        current_width = 0;
+        current_height = 0;
+        original_width = 0;
+        original_height = 0;
+        block_mode = false;
         
         // Set up signal handlers for clean exit
         signal(SIGINT, signalHandler);
@@ -402,30 +431,76 @@ public:
         std::cin.get();
     }
     
+    // Add new method for frame buffering
+    void bufferFrames(cv::VideoCapture& cap) {
+        while (buffer_running) {
+            std::unique_lock<std::mutex> lock(buffer_mutex);
+            if (frame_buffer.size() < FRAME_BUFFER_SIZE) {
+                cv::Mat frame;
+                if (!cap.read(frame)) {
+                    if (loop_video) {
+                        cap.set(cv::CAP_PROP_POS_FRAMES, 0);
+                        continue;
+                    }
+                    buffer_running = false;
+                    break;
+                }
+                
+                BufferedFrame bf;
+                bf.frame = frame;
+                bf.ascii_output = block_mode && current_color_mode != MONO ?
+                                frameToColorBlocks(frame, current_width, current_height) :
+                                frameToAscii(frame, current_width, current_height);
+                
+                frame_buffer.push_back(std::move(bf));
+                buffer_cv.notify_one();
+            } else {
+                lock.unlock();
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
+    }
+
+    // Modify playVideoAscii method
     bool playVideoAscii(const std::string& videoPath, int width = 0, int height = 0) {
+        // Store original dimensions
+        original_width = width;
+        original_height = height;
+        current_width = width;
+        current_height = height;
+
         cv::VideoCapture cap(videoPath);
         if (!cap.isOpened()) {
             std::cerr << "Error: Failed to open video file: " << videoPath << std::endl;
             return false;
         }
+
         displayVideoInfo(cap);
         TerminalGuard guard(original_termios, terminal_modified);
+        
         double fps = cap.get(cv::CAP_PROP_FPS);
         double base_delay = (fps > 0.0) ? (1000.0 / fps) : 33.33;
         double speed_multiplier = 1.0;
-        cv::Mat frame;
-        bool paused = false, block_mode = false, fullscreen_mode = false;
+        bool paused = false, fullscreen_mode = false;
         int frame_number = 0, total_frames = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_COUNT));
-        int original_width = width, original_height = height;
-        auto last_time = std::chrono::steady_clock::now();
         
-        while (true) {
+        // Initialize frame buffer
+        buffer_running = true;
+        frame_buffer.reserve(FRAME_BUFFER_SIZE);
+        buffer_thread = std::thread(&ASCIIVideoPlayer::bufferFrames, this, std::ref(cap));
+
+        auto last_time = std::chrono::steady_clock::now();
+
+        while (buffer_running || !frame_buffer.empty()) {
             if (kbhit()) {
                 char key;
                 while (read(STDIN_FILENO, &key, 1) > 0) {
                     switch (key) {
-                        case 'q': case 'Q': case 27: goto cleanup;
+                        case 'q': case 'Q': case 27: 
+                            buffer_running = false;
+                            goto cleanup;
                         case ' ': paused = !paused; break;
+                        case 'l': case 'L': loop_video = !loop_video; break;
                         case '+': case '=': speed_multiplier = std::min(speed_multiplier * 1.5, 5.0); break;
                         case '-': case '_': speed_multiplier = std::max(speed_multiplier / 1.5, 0.2); break;
                         case 'c': case 'C': 
@@ -448,40 +523,52 @@ public:
                     }
                 }
             }
-            
+
             if (!paused) {
-                if (!cap.read(frame) || frame.empty()) break;
+                std::unique_lock<std::mutex> lock(buffer_mutex);
+                if (frame_buffer.empty()) {
+                    buffer_cv.wait_for(lock, std::chrono::milliseconds(100));
+                    continue;
+                }
+
+                auto& bf = frame_buffer.front();
+                std::cout << "\033[2J\033[H" << bf.ascii_output;
                 frame_number++;
-            }
-            
-            std::cout << "\033[2J\033[H";
-            if (!frame.empty()) {
-                std::string ascii = (block_mode && current_color_mode != MONO) ? 
-                                   frameToColorBlocks(frame, width, height) : frameToAscii(frame, width, height);
-                std::cout << ascii;
-                
-                int progress = (total_frames > 0) ? (frame_number * 100 / total_frames) : 0;
+
+                // Display status
                 std::string color_mode_str = (current_color_mode == MONO ? "MONO" : 
                                             current_color_mode == COLOR_8BIT ? "8BIT" : "24BIT");
+                int progress = (total_frames > 0) ? (frame_number * 100 / total_frames) : 0;
                 std::cout << resetColor() << "\n[" << (paused ? "PAUSED" : "PLAYING") << "] "
-                          << "Frame: " << frame_number << "/" << total_frames
-                          << " (" << progress << "%) "
-                          << "Speed: " << std::fixed << std::setprecision(1) << speed_multiplier << "x "
-                          << "Mode: " << color_mode_str << (block_mode ? "-BLOCK" : "")
-                          << (fullscreen_mode ? " FULLSCREEN" : "")
-                          << " | Cache: " << std::fixed << std::setprecision(1) << cache_stats.hit_rate() << "%"
-                          << "\n[Q]Quit [SPACE]Pause [+/-]Speed [C]Color [B]Block [F]Fullscreen [R]ClearCache";
+                         << "Frame: " << frame_number << "/" << total_frames
+                         << " (" << progress << "%) "
+                         << "Speed: " << std::fixed << std::setprecision(1) << speed_multiplier << "x "
+                         << "Mode: " << color_mode_str << (block_mode ? "-BLOCK" : "")
+                         << (fullscreen_mode ? " FULLSCREEN" : "")
+                         << " Loop: " << (loop_video ? "ON" : "OFF")
+                         << " Buffer: " << frame_buffer.size() << "/" << FRAME_BUFFER_SIZE
+                         << "\n[Q]Quit [SPACE]Pause [L]Loop [+/-]Speed [C]Color [B]Block [F]Fullscreen";
+                
+                frame_buffer.erase(frame_buffer.begin());
+                lock.unlock();
+
+                // Frame timing control
+                double current_delay = base_delay / speed_multiplier;
+                auto now = std::chrono::steady_clock::now();
+                auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_time).count();
+                if (elapsed < current_delay) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<int>(current_delay - elapsed)));
+                }
+                last_time = std::chrono::steady_clock::now();
             }
-            std::cout << std::flush;
-            
-            double current_delay = base_delay / speed_multiplier;
-            auto now = std::chrono::steady_clock::now();
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_time).count();
-            if (elapsed < current_delay) std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<int>(current_delay - elapsed)));
-            last_time = std::chrono::steady_clock::now();
         }
-        
+
     cleanup:
+        buffer_running = false;
+        if (buffer_thread.joinable()) {
+            buffer_thread.join();
+        }
+        frame_buffer.clear();
         std::cout << resetColor() << "\n\nPlayback finished!\n";
         return true;
     }
@@ -550,88 +637,44 @@ public:
         std::cout << resetColor();
         return true;
     }
+    
+    // Add these near other public methods
+    void setLoopEnabled(bool enabled) { loop_video = enabled; }
+    void setBlockMode(bool enabled) { block_mode = enabled; }
+    
+    // Add static conversion method
+    static ColorMode convertColorMode(PlayerConfig::ColorMode mode) {
+        switch (mode) {
+            case PlayerConfig::COLOR_8BIT: return COLOR_8BIT;
+            case PlayerConfig::COLOR_24BIT: return COLOR_24BIT;
+            default: return MONO;
+        }
+    }
 };
 
 // Static member definition
 ASCIIVideoPlayer* ASCIIVideoPlayer::instance = nullptr;
 
 int main(int argc, char* argv[]) {
-    ASCIIVideoPlayer player;
+    PlayerConfig config;
     
     if (argc > 1) {
-        // Parse command line arguments
-        std::string videoPath = argv[1];
-        int width = 0, height = 0;
-        ASCIIVideoPlayer::ColorMode color_mode = ASCIIVideoPlayer::MONO;
-        
-        for (int i = 2; i < argc; i++) {
-            std::string arg = argv[i];
-            if (arg == "--color" || arg == "-c") {
-                color_mode = ASCIIVideoPlayer::COLOR_8BIT;
-            } else if (arg == "--truecolor" || arg == "-t") {
-                color_mode = ASCIIVideoPlayer::COLOR_24BIT;
-            } else if (arg == "--width" || arg == "-w") {
-                if (i + 1 < argc) width = std::atoi(argv[++i]);
-            } else if (arg == "--height" || arg == "-h") {
-                if (i + 1 < argc) height = std::atoi(argv[++i]);
-            }
-        }
-        
-        player.setColorMode(color_mode);
-        
-        if (!player.playVideoAscii(videoPath, width, height)) {
+        config = PlayerConfig::fromCommandLine(argc, argv);
+    } else {
+        config = PlayerConfig::fromInteractive();
+    }
+    
+    ASCIIVideoPlayer player;
+    player.setColorMode(ASCIIVideoPlayer::convertColorMode(config.colorMode));
+    player.setLoopEnabled(config.autoLoop);
+    player.setBlockMode(config.blockMode);
+    
+    if (!config.videoPath.empty()) {
+        if (!player.playVideoAscii(config.videoPath, config.width, config.height)) {
             return -1;
         }
     } else {
-        // Interactive mode
-        std::cout << "ASCII Video Player with Color Support\n";
-        std::cout << "====================================\n";
-        std::cout << "1. Play video file\n";
-        std::cout << "2. Play from camera\n";
-        std::cout << "Choice (1/2): ";
-        
-        int choice;
-        std::cin >> choice;
-        std::cin.ignore(); // Clear the input buffer
-        
-        if (choice == 1) {
-            std::cout << "Enter video file path: ";
-            std::string videoPath;
-            std::getline(std::cin, videoPath);
-            
-            std::cout << "Color mode:\n";
-            std::cout << "1. Monochrome\n";
-            std::cout << "2. 8-bit color (256 colors)\n";
-            std::cout << "3. 24-bit color (true color)\n";
-            std::cout << "Choice (1/2/3): ";
-            
-            int color_choice;
-            std::cin >> color_choice;
-            
-            ASCIIVideoPlayer::ColorMode mode = ASCIIVideoPlayer::MONO;
-            if (color_choice == 2) mode = ASCIIVideoPlayer::COLOR_8BIT;
-            else if (color_choice == 3) mode = ASCIIVideoPlayer::COLOR_24BIT;
-            
-            player.setColorMode(mode);
-            
-            if (!player.playVideoAscii(videoPath)) {
-                return -1;
-            }
-        } else if (choice == 2) {
-            std::cout << "Color mode (1=Mono, 2=8bit, 3=24bit): ";
-            int color_choice;
-            std::cin >> color_choice;
-            
-            ASCIIVideoPlayer::ColorMode mode = ASCIIVideoPlayer::MONO;
-            if (color_choice == 2) mode = ASCIIVideoPlayer::COLOR_8BIT;
-            else if (color_choice == 3) mode = ASCIIVideoPlayer::COLOR_24BIT;
-            
-            player.setColorMode(mode);
-            player.playFromCamera();
-        } else {
-            std::cout << "Invalid choice.\n";
-            return -1;
-        }
+        player.playFromCamera();
     }
     
     return 0;
