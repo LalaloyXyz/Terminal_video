@@ -1,0 +1,3 @@
+/home/pleumlookchill/Documents/VScode/cpp/terminal_video/build/CMakeFiles/terminal_video.dir
+/home/pleumlookchill/Documents/VScode/cpp/terminal_video/build/CMakeFiles/edit_cache.dir
+/home/pleumlookchill/Documents/VScode/cpp/terminal_video/build/CMakeFiles/rebuild_cache.dir
